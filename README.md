@@ -28,7 +28,7 @@ A full-stack news analysis application that uses the Gemini API to provide unbia
 
 1.  **Navigate to the project root:**
     ```sh
-    cd /Users/adhikari/Documents/Python/FactfirstAINews
+    cd ../FactfirstAINews
     ```
 
 2.  **Install Python dependencies:**
@@ -46,7 +46,7 @@ A full-stack news analysis application that uses the Gemini API to provide unbia
 
 1.  **Navigate to the frontend directory:**
     ```sh
-    cd /Users/adhikari/Documents/Python/FactfirstAINews/frontend
+    cd ../FactfirstAINews/frontend
     ```
 
 2.  **Install Node modules:**
