@@ -1,0 +1,39 @@
+/* NewsCard.css */
+
+.news-card {
+  background-color: #ffffff;
+  border-radius: 8px;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+  padding: 24px;
+  margin-bottom: 24px; /* Space between cards */
+  text-align: left;
+  transition: box-shadow 0.3s ease-in-out;
+  display: flex;
+  flex-direction: column;
+  height: 100%; /* Make cards in the same row equal height */
+}
+
+.news-card:hover {
+  box-shadow: 0 5px 15px rgba(0,0,0,0.15);
+  cursor: pointer;
+}
+
+.news-card-thumbnail {
+  font-size: 48px;
+  margin-bottom: 16px;
+}
+
+.news-card-headline {
+  font-size: 18px;
+  font-weight: 600;
+  line-height: 1.4;
+  color: #333;
+  flex-grow: 1; /* Allows headline to take up available space */
+  margin-bottom: 16px;
+}
+
+.news-card-source-count {
+  font-size: 14px;
+  color: #888;
+  font-weight: 500;
+}
