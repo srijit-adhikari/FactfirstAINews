@@ -12,7 +12,7 @@ const AppContent = () => {
   const navigate = useNavigate(); // Hook for navigation
 
   useEffect(() => {
-    fetch('/api/news')
+    fetch('/api/analysis')
       .then(response => {
         if (!response.ok) {
           throw new Error('Network response was not ok');
@@ -27,7 +27,7 @@ const AppContent = () => {
         setLoading(false);
       })
       .catch(error => {
-        console.error("Fetch error:", error);
+        console.error("Error fetching news:", error);
         setError(error.toString());
         setLoading(false);
       });
