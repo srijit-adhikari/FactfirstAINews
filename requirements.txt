@@ -5,3 +5,9 @@ gunicorn
 feedparser
 scikit-learn
 rich
+newsapi-python
+sentence-transformers
+hdbscan
+torch
+numpy
+umap-learn

@@ -1,180 +1,242 @@
-
 import os
-import re
-import sys
 import json
-import feedparser
-import google.generativeai as genai
+import re
+from datetime import datetime, timedelta
+import hdbscan
+import numpy as np
+import umap
 from dotenv import load_dotenv
-from rich.console import Console
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.cluster import DBSCAN
+from newsapi import NewsApiClient
+from sentence_transformers import SentenceTransformer
+import google.generativeai as genai
 
-# --- Console ---
-console = Console()
+# Load environment variables
+load_dotenv()
 
-# --- Configuration ---
-def configure_gemini():
-    """
-    Configures the Gemini API with the key from environment variables.
-    This version includes a critical fix to explicitly set the API endpoint,
-    making the application more robust against environment issues.
-    """
-    load_dotenv()
-    api_key = os.getenv("GOOGLE_API_KEY")
-    if not api_key:
-        console.print("🔴 [bold red]ERROR: GOOGLE_API_KEY environment variable not set.[/bold red]")
-        console.print("Please get your API key from https://aistudio.google.com/app/apikey and set it in a .env file.")
-        sys.exit(1)
-
-    # CRITICAL FIX: Explicitly set the client endpoint to avoid environment conflicts.
-    client_options = {"api_endpoint": "generativelanguage.googleapis.com"}
-    genai.configure(api_key=api_key, client_options=client_options)
-    console.print("✅ Gemini library configured successfully.")
-
-# --- RSS Feeds ---
-RSS_FEEDS = [
-    "http://rss.cnn.com/rss/cnn_topstories.rss",
-    "https://moxie.foxnews.com/google-publisher/latest.xml",
-    "https://feeds.npr.org/1014/rss.xml",
-    "https://www.aljazeera.com/xml/rss/all.xml",
-    "http://feeds.bbci.co.uk/news/world/rss.xml",
+# Configure the generative AI model
+genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+generation_config = {
+    "temperature": 0.5,
+    "top_p": 1,
+    "top_k": 1,
+    "max_output_tokens": 8192,
+}
+safety_settings = [
+    {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+    {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+    {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+    {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
 ]
+model = genai.GenerativeModel(
+    model_name="gemini-2.5-pro",
+    generation_config=generation_config,
+    safety_settings=safety_settings,
+)
+print("✅ Gemini library configured successfully.")
 
-# --- Text Processing ---
-def clean_text(text):
-    """Cleans text for TF-IDF vectorization."""
-    text = text.lower()
-    text = re.sub(r'[^\w\s]', '', text)
-    return text
 
-# --- News Fetching and Clustering ---
-def get_news_clusters():
-    """Fetches news and clusters it into stories."""
-    articles = []
-    for url in RSS_FEEDS:
-        feed = feedparser.parse(url)
-        for entry in feed.entries:
-            articles.append({
-                "title": entry.title,
-                "summary": entry.get("summary", entry.get("description", "")),
-                "link": entry.link,
-                "source": feed.feed.title
-            })
+def get_news(topic, hours=24):
+    """Fetches news articles from the last 24 hours on a given topic."""
+    print(f"🔍 Fetching news for topic: {topic} from the last {hours} hours...")
+    newsapi = NewsApiClient(api_key=os.getenv("NEWS_API_KEY"))
+    to_date = datetime.now()
+    from_date = to_date - timedelta(hours=hours)
+
+    try:
+        all_articles = newsapi.get_everything(
+            q=topic,
+            from_param=from_date.strftime("%Y-%m-%dT%H:%M:%S"),
+            to=to_date.strftime("%Y-%m-%dT%H:%M:%S"),
+            language="en",
+            sort_by="relevancy",
+            page_size=100,
+        )
+        print(f"✅ Found {len(all_articles['articles'])} articles from the News API.")
+        return all_articles["articles"]
+    except Exception as e:
+        print(f"❌ Error fetching news: {e}")
+        return []
+
+
+def get_news_clusters(articles):
+    """Clusters news articles based on their content."""
+    if not articles:
+        return []
+
+    print("🧠 Loading sentence transformer model ('all-MiniLM-L6-v2')...")
+    model_st = SentenceTransformer("all-MiniLM-L6-v2")
+
+    # Filter out articles with no content
+    articles = [article for article in articles if article.get("title") and article.get("content")]
+
+    print(f"⚡ Generating embeddings for {len(articles)} articles...")
+    # Use only title and first two paragraphs for embeddings
+    texts_to_embed = []
+    for article in articles:
+        title = article.get("title", "")
+        body = article.get("content", "")
+        paragraphs = [p.strip() for p in body.split('\n') if p.strip()]
+        lede = " ".join(paragraphs[:2])
+        texts_to_embed.append(title + " " + lede)
+
+    embeddings = model_st.encode(texts_to_embed, show_progress_bar=True)
+
+    print("📉 Reducing embedding dimensionality with UMAP...")
+    reducer = umap.UMAP(n_components=20, n_neighbors=5, metric="cosine", random_state=42)
+    reduced_embeddings = reducer.fit_transform(embeddings)
+
+    print("🤖 Clustering articles with HDBSCAN...")
+    clusterer = hdbscan.HDBSCAN(
+        min_cluster_size=3,
+        min_samples=3,
+        cluster_selection_method="leaf"
+    )
+    labels = clusterer.fit_predict(reduced_embeddings)
+
+    # Group articles by cluster label
+    clusters = {}
+    for i, article in enumerate(articles):
+        label = labels[i]
+        if label != -1:  # -1 is for noise
+            if label not in clusters:
+                clusters[label] = []
+            clusters[label].append(article)
+
+    print(f"✅ Clustering complete. Found {len(clusters)} stories from {len(articles)} articles.")
+    return list(clusters.values())
+
+
+def analyze_cluster(cluster):
+    """Analyzes a cluster of articles to find consensus, disputes, and narratives."""
+    if not cluster:
+        return None
+
+    # Prepare the prompt for the generative model
+    prompt_parts = [
+        "Analyze the following news articles to identify the core news story. Based on all the articles provided, generate a comprehensive analysis in JSON format.",
+        "\n--- Start of Articles ---\n",
+    ]
+    for article in cluster:
+        prompt_parts.append(f"Source: {article['source']['name']}\n")
+        prompt_parts.append(f"Title: {article['title']}\n")
+        prompt_parts.append(f"Link: {article['url']}\n\n")
+    prompt_parts.append("--- End of Articles ---\n")
+    prompt_parts.append(
+        '''
+Here is an example of the desired JSON structure. Ensure your output matches this format exactly. The 'narrative_analysis' array is mandatory and must be populated.
+
+```json
+{
+  "story_title": "Example Story Title",
+  "timeline_of_events": [
+    {
+      "date": "YYYY-MM-DD",
+      "event": "Description of a key event."
+    }
+  ],
+  "consensus_facts": [
+    "A verifiable fact agreed upon by multiple sources (Source: Name)",
+    "Another verifiable fact (Source: Name)"
+  ],
+  "disputed_claims": [
+    {
+      "claim": "A claim that is disputed.",
+      "sources_in_disagreement": [
+        {"source": "Source A", "stance": "Their position on the claim."},
+        {"source": "Source B", "stance": "Their different position."}
+      ]
+    }
+  ],
+  "analysis_of_omissions": [
+    {
+      "omission": "What key information is missing.",
+      "impact": "The effect of this omission on the reader\'s understanding."
+    }
+  ],
+  "narrative_analysis": [
+    {
+      "narrative_frame": "The name of the narrative frame (e.g., 'David vs. Goliath').",
+      "description": "A description of how the sources use this frame to tell the story.",
+      "sources": ["Source A", "Source C"]
+    }
+  ],
+  "region": "Primary geographical region of the story",
+  "topicality": "Primary topic (e.g., 'Politics')"
+}
+```
+
+Provide the analysis in a single, well-formatted JSON object, enclosed in ```json and ```.
+'''
+    )
+
+    response = None  # Define response here to make it available in the except block
+    try:
+        response = model.generate_content(prompt_parts)
+
+        # Explicitly check if the response was blocked
+        if not response.parts:
+            raise ValueError(
+                f"Response was blocked. Finish reason: {response.candidates[0].finish_reason}. Prompt feedback: {response.prompt_feedback}"
+            )
+
+        # Use regex to find the JSON block
+        json_match = re.search(r"```json(.*)```", response.text, re.DOTALL)
+        if not json_match:
+            raise ValueError("Could not find a JSON block in the response.")
+
+        json_str = json_match.group(1).strip()
+        analysis = json.loads(json_str)
+
+        analysis["source_articles"] = [
+            {"source": a["source"]["name"], "title": a["title"], "link": a["url"]}
+            for a in cluster
+        ]
+        return analysis
+    except (json.JSONDecodeError, ValueError, Exception) as e:
+        print(f"❌ Error analyzing cluster: {e}")
+        if response:
+            print(f"Prompt feedback: {response.prompt_feedback}")
+            # print(f"Raw response was: {response.text}") # Be careful printing raw response
+        else:
+            print("No response object was created.")
+        return None
+
+
+def get_news_analysis(topic):
+    """Main function to run the news analysis."""
+    articles = get_news(topic)
 
     if not articles:
         return []
 
-    # Clean titles for clustering
-    cleaned_titles = [clean_text(article["title"]) for article in articles]
+    clusters = get_news_clusters(articles)
 
-    # Vectorize and cluster
-    vectorizer = TfidfVectorizer(stop_words="english")
-    tfidf_matrix = vectorizer.fit_transform(cleaned_titles)
-    # Adjusted eps for better clustering
-    clustering = DBSCAN(eps=0.8, min_samples=2, metric="cosine").fit(tfidf_matrix)
+    if not clusters:
+        print("No significant story clusters found.")
+        return []
 
-    # Group articles by cluster
-    clusters = {}
-    for i, label in enumerate(clustering.labels_):
-        if label != -1:  # Ignore noise points
-            if label not in clusters:
-                clusters[label] = []
-            clusters[label].append(articles[i])
-    
-    return list(clusters.values())
+    all_analyses = []
+    for i, cluster in enumerate(clusters):
+        print(f"🕵️ Analyzing story {i+1}/{len(clusters)}...")
+        analysis = analyze_cluster(cluster)
+        if analysis:
+            all_analyses.append(analysis)
 
-
-# --- AI Analysis ---
-def get_consolidated_analysis(story_cluster):
-    """
-    Sends a cluster of articles to the Gemini model for consolidated analysis.
-    """
-    # Prepare the content for the AI model
-    prompt_content = '''
-    You are an expert news analyst. I will provide you with a JSON object containing a list of articles about the same news story.
-    Your task is to perform a comprehensive analysis and return a single, consolidated JSON object with the following structure.
-
-    IMPORTANT: The output MUST be a single, valid, syntactically correct JSON object. Do not include any text, explanations, or markdown formatting (e.g., ```json) before or after the JSON object.
-
-    PAY SPECIAL ATTENTION to the 'sentiments' object. It contains three nested objects: 'for', 'neutral', and 'against'. You MUST place a comma after the closing brace of the 'for' object and after the closing brace of the 'neutral' object.
-
-    {
-      "factual_headline": "A neutral, factual headline for the entire story.",
-      "core_facts": [
-        "A list of key, verifiable facts extracted from all articles."
-      ],
-      "emoji_thumbnail": "A single emoji that visually represents the story.",
-      "sentiments": {
-        "for": {
-          "summary": "A summary of the 'for' or positive sentiment/framing, if present.",
-          "examples": ["An example quote or headline from one of the articles."]
-        },
-        "neutral": {
-          "summary": "A summary of the neutral framing, if present.",
-          "examples": ["An example quote or headline."]
-        },
-        "against": {
-          "summary": "A summary of the 'against' or negative sentiment/framing, if present.",
-          "examples": ["An example quote or headline."]
-        }
-      },
-      "source_articles": [
-        {
-          "title": "The original title of the article.",
-          "link": "The URL of the article.",
-          "source": "The name of the news source."
-        }
-      ]
-    }
-    Analyze the provided articles and generate the consolidated report.
-    '''
-
-    # Create the list of articles for the prompt
-    articles_for_prompt = [
-        {
-            "title": article["title"],
-            "summary": article["summary"],
-            "source": article["source"]
-        } for article in story_cluster
+    # Keywords to identify summaries of unrelated articles
+    unrelated_keywords = [
+        'unrelated', 'no core story', 'no common story', 'disparate',
+        'no single core', 'analysis impossible', 'assorted',
+        'lack of a unifying', 'do not cover the same event', 'no single core story'
     ]
 
-    # Create the model and generate content
-    model = genai.GenerativeModel('gemini-2.5-flash')
-    response = model.generate_content([prompt_content, str(articles_for_prompt)])
-    return response.text
+    coherent_stories = []
+    for analysis in all_analyses:
+        # Use the same robust check across multiple fields
+        analysis_text = json.dumps(analysis).lower()
+        is_unrelated = any(keyword in analysis_text for keyword in unrelated_keywords)
 
-
-# --- Main Function ---
-def get_news_analysis():
-    """
-    The main function to be called by the Flask app.
-    Fetches, clusters, and analyzes news, returning a list of JSON objects.
-    """
-    # --- Configuration ---
-    configure_gemini()
-
-    story_clusters = get_news_clusters()
-    analyzed_stories = []
-    for cluster in story_clusters:
-        if len(cluster) > 1: # Only analyze clusters with more than one article
-            analysis_text = get_consolidated_analysis(cluster)
-            try:
-                # Find the start and end of the JSON object to handle malformed responses
-                start_index = analysis_text.find('{')
-                end_index = analysis_text.rfind('}') + 1
-                
-                # Ensure both '{' and '}' were found and in the correct order
-                if start_index != -1 and end_index > start_index:
-                    json_string = analysis_text[start_index:end_index]
-                    parsed_json = json.loads(json_string)
-                    analyzed_stories.append(parsed_json)
-                else:
-                    console.print(f"⚠️ [bold yellow]Warning:[/bold yellow] No valid JSON object found in response:\n{analysis_text}")
-
-            except json.JSONDecodeError as e:
-                # Handle JSON parsing errors gracefully
-                console.print(f"🔴 [bold red]ERROR:[/bold red] Failed to decode JSON. Error: {e}")
-                console.print(f"Attempted to parse: {json_string}")
-
-    return analyzed_stories
+        if not is_unrelated:
+            coherent_stories.append(analysis)
+    
+    print(f"✅ Analysis complete. Found {len(coherent_stories)} coherent stories.")
+    return coherent_stories
