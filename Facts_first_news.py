@@ -160,8 +160,8 @@ Here is an example of the desired JSON structure. Ensure your output matches thi
       "sources": ["Source A", "Source C"]
     }
   ],
-  "region": "Primary geographical region of the story",
-  "topicality": "Primary topic (e.g., 'Politics')"
+  "region": "The primary geographical region of the story. Be as specific as possible (e.g., 'Xinjiang, China', 'Tel Aviv, Israel', 'Global').",
+  "topicality": "Choose the most relevant topic from this list: [Politics, Technology, Business, Sports, Entertainment, Health, Science, World News, Geopolitics, Economy]"
 }
 ```
 
